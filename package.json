@@ -1,10 +1,10 @@
 {
   "name": "@allenyolk/pi-delete",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publishConfig": {
     "access": "public"
   },
-  "description": "Delete the current Pi session on exit, optionally cascading to its descendants.",
+  "description": "Delete Pi sessions with their subagent/fork subtree \u2014 /delete on exit, shift+ctrl+d in the picker.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/AllenYolk/pi-delete.git"

@@ -1,23 +1,8 @@
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { unlink } from "node:fs/promises";
+import { basename } from "node:path";
 import * as Pi from "@earendil-works/pi-coding-agent";
 import { collectDescendants, type DescendantEntry } from "./descendants.ts";
-
-/** Delete one file, preferring `trash` so the removal stays recoverable.
- *  Returns an error message when the file survives both attempts. */
-export async function deleteSessionFile(path: string): Promise<string | undefined> {
-  if (!existsSync(path)) return undefined;
-  const args = path.startsWith("-") ? ["--", path] : [path];
-  const trash = spawnSync("trash", args, { encoding: "utf-8" });
-  if (trash.status === 0 || !existsSync(path)) return undefined;
-  try {
-    await unlink(path);
-    return undefined;
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-}
+import { deleteSessionFiles } from "./delete-sessions.ts";
+import { installSelectorCascade } from "./selector-patch.ts";
 
 /** One line per session: indented by depth, identified the way Pi's own picker
  *  does it — by name or opening message, not by UUID filename. */
@@ -30,19 +15,26 @@ function describe({ session, depth }: DescendantEntry): string {
 
 export default function sessionDelete(pi: Pi.ExtensionAPI): void {
   let pending: string[] = [];
+  let disposeCascade: (() => void) | undefined;
+
+  pi.on("session_start", (_event, ctx) => {
+    disposeCascade?.();
+    disposeCascade = undefined;
+    if (ctx.mode !== "tui" || !ctx.hasUI) return;
+    disposeCascade = installSelectorCascade((message) =>
+      ctx.ui.notify(`pi-delete: ${message}`, "warning"),
+    );
+  });
 
   pi.on("session_shutdown", async () => {
+    disposeCascade?.();
+    disposeCascade = undefined;
     const targets = pending;
     pending = [];
-    const failures: string[] = [];
-    for (const path of targets) {
-      const error = await deleteSessionFile(path);
-      if (error) failures.push(`  ${path}: ${error}`);
-    }
+    const failures = await deleteSessionFiles(targets);
     if (failures.length > 0) {
-      console.error(
-        `pi-delete: ${failures.length} file(s) could not be deleted:\n${failures.join("\n")}`,
-      );
+      const lines = failures.map((f) => `  ${f.path}: ${f.error}`).join("\n");
+      console.error(`pi-delete: ${failures.length} file(s) could not be deleted:\n${lines}`);
     }
   });
 

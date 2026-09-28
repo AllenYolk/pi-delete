@@ -64,3 +64,34 @@ test("self-parenting session is not its own descendant", () => {
   const all = [session("/s/loop.jsonl", "/s/loop.jsonl")];
   assert.deepEqual(collectDescendants(all, "/s/loop.jsonl"), []);
 });
+
+// --- planCascade: the active session must survive a cascade ---
+
+const { planCascade } = await import("../src/descendants.ts");
+const never = () => false;
+
+test("plan refuses to delete the active session itself", () => {
+  const all = [session("/s/root.jsonl"), session("/s/kid.jsonl", "/s/root.jsonl")];
+  const plan = planCascade(all, "/s/root.jsonl", (p) => p === "/s/root.jsonl");
+  assert.equal(plan.blocked, true);
+  assert.deepEqual(plan.targets, []);
+});
+
+test("plan keeps the active session when it is a descendant", () => {
+  const all = [
+    session("/s/root.jsonl"),
+    session("/s/live.jsonl", "/s/root.jsonl"),
+    session("/s/other.jsonl", "/s/root.jsonl"),
+    session("/s/deep.jsonl", "/s/live.jsonl"),
+  ];
+  const plan = planCascade(all, "/s/root.jsonl", (p) => p === "/s/live.jsonl");
+  assert.equal(plan.blocked, false);
+  assert.equal(plan.skipped, 1);
+  assert.ok(!plan.targets.includes("/s/live.jsonl"), "active session must not be a target");
+  assert.deepEqual(plan.targets.sort(), ["/s/deep.jsonl", "/s/other.jsonl", "/s/root.jsonl"]);
+});
+
+test("plan on a leaf targets only that session", () => {
+  const all = [session("/s/root.jsonl"), session("/s/leaf.jsonl", "/s/root.jsonl")];
+  assert.deepEqual(planCascade(all, "/s/leaf.jsonl", never).targets, ["/s/leaf.jsonl"]);
+});

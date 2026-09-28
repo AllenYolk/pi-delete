@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { deleteSessionFile } from "../src/index.ts";
+import { deleteSessionFile } from "../src/delete-sessions.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-delete-"));
 after(() => {

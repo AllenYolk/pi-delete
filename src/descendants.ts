@@ -24,8 +24,7 @@ export function canonicalize(path: string): string {
  * Collect every descendant of `rootPath`, depth-first. Cycles in
  * `parentSessionPath` terminate instead of recursing forever.
  */
-export function collectDescendants(sessions: SessionInfo[], rootPath: string): DescendantEntry[] {
-  const childrenByParent = new Map<string, SessionInfo[]>();
+export function collectDescendants(sessions: SessionInfo[], rootPath: string): DescendantEntry[] {  const childrenByParent = new Map<string, SessionInfo[]>();
   for (const session of sessions) {
     if (!session.parentSessionPath) continue;
     const parent = canonicalize(session.parentSessionPath);
@@ -50,4 +49,33 @@ export function collectDescendants(sessions: SessionInfo[], rootPath: string): D
   walk(root, 1);
 
   return found;
+}
+
+export interface CascadePlan {
+  /** Paths to remove, selected node first. Empty when the delete is refused. */
+  targets: string[];
+  /** Set when the selected node is the live session, which must never be deleted. */
+  blocked: boolean;
+  /** Descendants kept back because they are the live session. */
+  skipped: number;
+}
+
+/**
+ * Decide what a cascade from `selected` may remove. The active session survives
+ * both as the selected node and as any descendant of it, matching the rule Pi's
+ * own single delete enforces.
+ */
+export function planCascade(
+  sessions: SessionInfo[],
+  selected: string,
+  isCurrent: (path: string) => boolean,
+): CascadePlan {
+  if (isCurrent(selected)) return { targets: [], blocked: true, skipped: 0 };
+  const descendants = collectDescendants(sessions, selected).map((d) => d.session.path);
+  const deletable = descendants.filter((path) => !isCurrent(path));
+  return {
+    targets: [selected, ...deletable],
+    blocked: false,
+    skipped: descendants.length - deletable.length,
+  };
 }
