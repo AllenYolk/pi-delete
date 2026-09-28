@@ -1,4 +1,4 @@
-import { SessionSelectorComponent } from "@earendil-works/pi-coding-agent";
+import { rawKeyHint, SessionSelectorComponent } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { planCascade } from "./descendants.ts";
 import { deleteSessionFiles } from "./delete-sessions.ts";
@@ -10,9 +10,9 @@ import { deleteSessionFiles } from "./delete-sessions.ts";
 const CASCADE_KEY = "t";
 const INSTALLED = Symbol.for("pi-delete.selectorCascade");
 const HEADER_PATCHED = Symbol.for("pi-delete.selectorHint");
-/** Text Pi puts in its confirmation line; the hint rides along after it. */
+/** Text Pi puts in its confirmation line, and the separator between its hints. */
 const CONFIRM_MARKER = "Delete session?";
-const HINT = ` \u00b7 ${CASCADE_KEY} subtree`;
+const SEPARATOR = " \u00b7 ";
 
 interface SessionRow {
   path: string;
@@ -54,10 +54,15 @@ function usable(target: unknown): target is Selector {
 }
 
 /**
- * Append the cascade hint to Pi's delete-confirmation line, so the key is
- * discoverable where it is used. Patched on the header instance's prototype,
- * reached through a live selector because the header class is not exported.
- * Silently does nothing if the line is missing or the row is already full.
+ * Add the cascade hint to Pi's delete-confirmation line, between the confirm
+ * and cancel hints so the three read in the order they escalate. Built with
+ * Pi's own rawKeyHint so it inherits the dim-key/muted-label styling of its
+ * neighbours, and spliced before the first separator so it lands inside the
+ * line's existing color runs rather than after them.
+ *
+ * Patched on the header instance's prototype, reached through a live selector
+ * because the header class is not exported. Does nothing if the line is
+ * missing, the separator is gone, or the row has no space left.
  */
 function patchHeaderHint(header: object): (() => void) | undefined {
   const proto = Object.getPrototypeOf(header) as Record<string | symbol, unknown> | null;
@@ -68,13 +73,14 @@ function patchHeaderHint(header: object): (() => void) | undefined {
   proto.render = function (this: { confirmingDeletePath?: string | null }, width: number) {
     const lines = (original as (w: number) => unknown).call(this, width);
     if (!this.confirmingDeletePath || !Array.isArray(lines)) return lines;
-    return lines.map((line) =>
-      typeof line === "string" &&
-      line.includes(CONFIRM_MARKER) &&
-      visibleWidth(line) + HINT.length <= width
-        ? line + HINT
-        : line,
-    );
+    const hint = rawKeyHint(CASCADE_KEY, "subtree");
+    const extra = visibleWidth(hint) + visibleWidth(SEPARATOR);
+    return lines.map((line) => {
+      if (typeof line !== "string" || !line.includes(CONFIRM_MARKER)) return line;
+      const at = line.indexOf(SEPARATOR);
+      if (at < 0 || visibleWidth(line) + extra > width) return line;
+      return line.slice(0, at) + SEPARATOR + hint + line.slice(at);
+    });
   };
   return () => {
     proto.render = original;
