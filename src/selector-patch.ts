@@ -1,82 +1,116 @@
 import { SessionSelectorComponent } from "@earendil-works/pi-coding-agent";
-import { matchesKey } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { planCascade } from "./descendants.ts";
 import { deleteSessionFiles } from "./delete-sessions.ts";
 
-/** Paired with ctrl+d (delete one) so the cascade reads as its shift variant.
- *  Terminals without the kitty keyboard protocol cannot distinguish the two and
- *  send plain ctrl+d, which falls through to Pi's single delete — fewer files
- *  removed, never more. */
-const CASCADE_KEY = "shift+ctrl+d";
+/** Pressed while Pi's own ctrl+d confirmation is up, so the cascade is a second
+ *  answer to a question the picker already asked. A plain letter is safe there:
+ *  the picker ignores every other key in that state, and unlike shift+enter or
+ *  shift+ctrl+d it needs no kitty keyboard protocol to be distinguishable. */
+const CASCADE_KEY = "t";
 const INSTALLED = Symbol.for("pi-delete.selectorCascade");
+const HEADER_PATCHED = Symbol.for("pi-delete.selectorHint");
+/** Text Pi puts in its confirmation line; the hint rides along after it. */
+const CONFIRM_MARKER = "Delete session?";
+const HINT = ` \u00b7 ${CASCADE_KEY} subtree`;
 
-/** Instance members this patch drives. They are internals of an exported class,
- *  not a public contract, so every one is verified before the patch takes over a
- *  keystroke; a mismatch falls back to native behavior instead of half-working. */
-const REQUIRED_FIELDS = ["sessionList", "header", "requestRender", "scope"] as const;
+interface SessionRow {
+  path: string;
+  name?: string;
+  firstMessage?: string;
+}
 
 interface Selector {
-  mode?: string;
   scope: "current" | "all";
-  currentSessions: { path: string }[] | null;
-  allSessions: { path: string }[] | null;
+  currentSessions: SessionRow[] | null;
+  allSessions: SessionRow[] | null;
   header: { setStatusMessage(msg: { type: string; message: string } | null, ms?: number): void };
   requestRender(): void;
   refreshSessionsAfterMutation?(): Promise<void>;
   sessionList: {
-    getSelectedSessionPath(): string | undefined;
+    confirmingDeletePath: string | null;
+    setConfirmingDeletePath(path: string | null): void;
     isCurrentSessionPath(path: string): boolean;
     setSessions(sessions: unknown[], showCwd: boolean): void;
   };
 }
 
+/** These are internals of an exported class, so they are checked before the
+ *  patch acts on a keystroke; anything unexpected falls back to Pi's behavior. */
 function usable(target: unknown): target is Selector {
   const s = target as Record<string, unknown> | null;
-  if (!s) return false;
-  for (const field of REQUIRED_FIELDS) if (s[field] === undefined || s[field] === null) return false;
-  const list = s.sessionList as Record<string, unknown>;
+  if (!s || typeof s.requestRender !== "function") return false;
+  const list = s.sessionList as Record<string, unknown> | undefined;
+  const header = s.header as Record<string, unknown> | undefined;
   return (
-    typeof s.requestRender === "function" &&
-    typeof (s.header as Record<string, unknown>).setStatusMessage === "function" &&
-    typeof list.getSelectedSessionPath === "function" &&
+    !!list &&
+    !!header &&
+    typeof header.setStatusMessage === "function" &&
+    typeof list.setConfirmingDeletePath === "function" &&
     typeof list.isCurrentSessionPath === "function" &&
-    typeof list.setSessions === "function"
+    typeof list.setSessions === "function" &&
+    (s.scope === "current" || s.scope === "all")
   );
 }
 
-function label(path: string, sessions: { path: string; name?: string; firstMessage?: string }[]): string {
-  const session = sessions.find((s) => s.path === path);
-  const text = session?.name ?? session?.firstMessage ?? "session";
-  return text.replace(/\s+/g, " ").slice(0, 24);
+/**
+ * Append the cascade hint to Pi's delete-confirmation line, so the key is
+ * discoverable where it is used. Patched on the header instance's prototype,
+ * reached through a live selector because the header class is not exported.
+ * Silently does nothing if the line is missing or the row is already full.
+ */
+function patchHeaderHint(header: object): (() => void) | undefined {
+  const proto = Object.getPrototypeOf(header) as Record<string | symbol, unknown> | null;
+  const original = proto?.render;
+  if (!proto || typeof original !== "function" || proto[HEADER_PATCHED]) return undefined;
+
+  proto[HEADER_PATCHED] = true;
+  proto.render = function (this: { confirmingDeletePath?: string | null }, width: number) {
+    const lines = (original as (w: number) => unknown).call(this, width);
+    if (!this.confirmingDeletePath || !Array.isArray(lines)) return lines;
+    return lines.map((line) =>
+      typeof line === "string" &&
+      line.includes(CONFIRM_MARKER) &&
+      visibleWidth(line) + HINT.length <= width
+        ? line + HINT
+        : line,
+    );
+  };
+  return () => {
+    proto.render = original;
+    delete proto[HEADER_PATCHED];
+  };
 }
 
-async function runCascade(selector: Selector, targets: string[], sessions: { path: string }[]): Promise<void> {
+async function runCascade(selector: Selector, targets: string[]): Promise<void> {
   const failures = await deleteSessionFiles(targets);
   const failed = new Set(failures.map((f) => f.path));
   const gone = new Set(targets.filter((p) => !failed.has(p)));
 
-  const drop = <T extends { path: string }>(list: T[] | null) =>
+  const keep = <T extends { path: string }>(list: T[] | null) =>
     list ? list.filter((s) => !gone.has(s.path)) : list;
-  selector.currentSessions = drop(selector.currentSessions);
-  selector.allSessions = drop(selector.allSessions);
+  selector.currentSessions = keep(selector.currentSessions);
+  selector.allSessions = keep(selector.allSessions);
 
   const showCwd = selector.scope === "all";
-  const remaining = (showCwd ? selector.allSessions : selector.currentSessions) ?? [];
-  selector.sessionList.setSessions(remaining, showCwd);
+  selector.sessionList.setSessions((showCwd ? selector.allSessions : selector.currentSessions) ?? [], showCwd);
 
-  const message = failures.length
-    ? `Deleted ${gone.size}, failed ${failures.length}: ${failures[0]?.error.slice(0, 60)}`
-    : `Deleted ${gone.size} session${gone.size === 1 ? "" : "s"}`;
-  selector.header.setStatusMessage({ type: failures.length ? "error" : "info", message }, 4000);
+  selector.header.setStatusMessage(
+    failures.length
+      ? { type: "error", message: `Deleted ${gone.size}, failed ${failures.length}: ${failures[0]?.error.slice(0, 60)}` }
+      : { type: "info", message: `Deleted ${gone.size} session${gone.size === 1 ? "" : "s"}` },
+    4000,
+  );
 
   await selector.refreshSessionsAfterMutation?.();
   selector.requestRender();
-  void sessions;
 }
 
 /**
- * Add cascade delete to Pi's session picker. Returns a disposer, or undefined
- * when the host does not match what this patch expects.
+ * Extend Pi's delete confirmation in the session picker: ctrl+d then `t`
+ * removes the highlighted session together with its descendants, where ctrl+d
+ * then enter removes just the one. Returns a disposer, or undefined when the
+ * host does not look the way this patch expects.
  */
 export function installSelectorCascade(report: (message: string) => void): (() => void) | undefined {
   const proto = SessionSelectorComponent?.prototype as unknown as
@@ -89,33 +123,34 @@ export function installSelectorCascade(report: (message: string) => void): (() =
   if (proto[INSTALLED]) return undefined;
 
   const original = proto.handleInput as (this: unknown, data: unknown) => unknown;
-  // One pending confirmation per selector instance; never keeps a selector alive.
-  const pending = new WeakMap<object, string>();
   let reportedMismatch = false;
+  let disposeHint: (() => void) | undefined;
 
   proto[INSTALLED] = true;
   proto.handleInput = function (this: Record<string, unknown>, data: unknown) {
-    if (this.mode === "rename" || !matchesKey(data as never, CASCADE_KEY as never)) {
-      // Any other key abandons a half-finished confirmation.
-      pending.delete(this);
-      return original.call(this, data);
-    }
+    const forward = () => original.call(this, data);
+    // The hint needs a live header, which only exists once a picker is open.
+    if (!disposeHint && this.header) disposeHint = patchHeaderHint(this.header as object);
+    if (this.mode === "rename" || data !== CASCADE_KEY) return forward();
+
+    const list = this.sessionList as { confirmingDeletePath?: string | null } | undefined;
+    const target = list?.confirmingDeletePath;
+    // Only meaningful as an answer to Pi's own delete confirmation.
+    if (!target) return forward();
+
     if (!usable(this)) {
       if (!reportedMismatch) {
         reportedMismatch = true;
         report("session picker internals changed; cascade delete disabled");
       }
-      return original.call(this, data);
+      return forward();
     }
 
     const selector = this as unknown as Selector;
-    const selected = selector.sessionList.getSelectedSessionPath();
-    if (!selected) return undefined;
-
     const pool = (selector.scope === "all" ? selector.allSessions : selector.currentSessions) ?? [];
-    const plan = planCascade(pool as never, selected, (path) =>
-      selector.sessionList.isCurrentSessionPath(path),
-    );
+    const plan = planCascade(pool as never, target, (p) => selector.sessionList.isCurrentSessionPath(p));
+
+    selector.sessionList.setConfirmingDeletePath(null);
     if (plan.blocked) {
       selector.header.setStatusMessage(
         { type: "error", message: "Cannot delete the currently active session" },
@@ -125,31 +160,13 @@ export function installSelectorCascade(report: (message: string) => void): (() =
       return undefined;
     }
 
-    if (pending.get(this) === selected) {
-      pending.delete(this);
-      void runCascade(selector, plan.targets, pool);
-      return undefined;
-    }
-
-    pending.set(this, selected);
-    // The picker already highlights the row and draws its subtree, so the
-    // prompt only has to say how far the delete reaches; the header truncates
-    // to one line.
-    const extra = plan.targets.length - 1;
-    const tail = extra ? `+ ${extra} descendant${extra === 1 ? "" : "s"}` : "(no descendants)";
-    const kept = plan.skipped ? " (active session kept)" : "";
-    selector.header.setStatusMessage(
-      {
-        type: "error",
-        message: `Delete "${label(selected, pool as never)}" ${tail}?${kept} ${CASCADE_KEY} confirms`,
-      },
-      8000,
-    );
-    selector.requestRender();
+    void runCascade(selector, plan.targets);
     return undefined;
   };
 
   return () => {
+    disposeHint?.();
+    disposeHint = undefined;
     proto.handleInput = original;
     delete proto[INSTALLED];
   };

@@ -45,26 +45,24 @@ Pick theirs for targeting sessions by ID from the CLI. Pick this one for the cod
 
 ## In the session picker
 
-`/resume` lists sessions as a tree. Put the cursor on any node and press **`shift+ctrl+d`** to delete it together with everything below it:
+`/resume` already deletes one session with `ctrl+d`, then `enter` to confirm. This adds a second answer to that same question: **`t`** deletes the highlighted session together with everything below it.
 
 ```text
-ctrl+s sort · ctrl+n named · ctrl+d delete · ctrl+p path · ctrl+r rename
-
 › main session                                              2 now
      ├─ subagent B                                          2 now
      └─ subagent A                                          2 now
         └─ nested subagent under A                          2 now
 
-Delete "main session" + 3 descendants? shift+ctrl+d confirms
+Delete session? enter confirm · escape/ctrl+c cancel · t subtree
 ```
 
-Press it once for the prompt, again to delete; any other key cancels. The list updates in place, so there is no need to close and reopen the picker. `ctrl+d` still deletes one session, unchanged.
+`ctrl+d` then `enter` still removes exactly one session; `ctrl+d` then `t` removes the subtree. The list updates in place, so there is no need to close and reopen the picker.
 
-The subtree is already drawn in the list, so the prompt only reports how far the delete reaches rather than repeating the names.
+No new top-level keybinding is introduced, and `t` is unambiguous because the picker ignores every other key while its confirmation is up — outside that state `t` goes to the search box as usual. It also needs no kitty keyboard protocol, so it behaves the same in every terminal.
 
-The active session is never deleted — not when the cursor is on it, and not when it sits somewhere below the node being cascaded. In that second case it is held back and the prompt says so.
+The subtree is already drawn in the list, so the prompt does not repeat the names.
 
-Terminals without the kitty keyboard protocol cannot tell `shift+ctrl+d` from `ctrl+d` and send the latter, which falls through to Pi's single delete. The failure mode removes fewer sessions, never more.
+The active session is never deleted — not when the cursor is on it, and not when it sits somewhere below the node being cascaded; in that case it is held back and the rest still go.
 
 This is not available in the picker that `pi --resume` opens at startup. That picker runs and returns before extensions are loaded (`createSessionManager` precedes `createAgentSessionServices` in Pi's startup), so no extension can reach it. Resume into a session first, then use `/resume`.
 
@@ -92,9 +90,9 @@ Deleting only the current session leaves its children pointing at a file that is
 
 ## How the picker key is added
 
-Pi's picker consumes its own keys and offers no hook, and extension shortcuts registered with `registerShortcut` only reach the editor. So the binding is installed by wrapping `handleInput` on `SessionSelectorComponent`, which Pi exports from its package entry.
+Pi's picker consumes its own keys and offers no hook, and extension shortcuts registered with `registerShortcut` only reach the editor. So the binding is installed by wrapping `handleInput` on `SessionSelectorComponent`, which Pi exports from its package entry, plus the header's `render` to show the hint.
 
-That class is public; the fields the patch drives (`sessionList`, `currentSessions`, `header`, and the rest) are not. Every one is verified before the patch handles a keystroke. If any is missing or the wrong shape, the patch reports once and forwards every key to Pi untouched, so a Pi upgrade that moves these internals costs the cascade binding and nothing else. The patch is removed on shutdown and reload.
+That class is public; the fields the patch drives (`sessionList`, `currentSessions`, `header`, and the rest) are not. Every one is verified before the patch acts on a keystroke. If any is missing or the wrong shape, the patch reports once and forwards every key to Pi untouched, so a Pi upgrade that moves these internals costs the cascade binding and nothing else. The hint is skipped silently when the confirmation line no longer matches or the row is full. Both patches are removed on shutdown and reload.
 
 ## Development
 
@@ -105,7 +103,9 @@ npm run check
 
 Tests cover descendant collection (including cycles in `parentSessionPath`), the rule that keeps the active session out of a cascade, and the trash/unlink/report path.
 
-`npm run sandbox` builds a throwaway profile with a four-session tree and prints the commands to open Pi against it, so the interactive flow can be exercised without touching real sessions. Both surfaces were verified this way against Pi 0.87.1 by driving a real TUI in a PTY: `/delete` (cascade, current-only, cancel, leaf, ephemeral) and the picker binding (cascade, leaf, active-session refusal, active-session-as-descendant, cancel).
+`npm run sandbox` builds a throwaway profile with a four-session tree and prints the commands to open Pi against it, so the interactive flow can be exercised without touching real sessions. Both surfaces were verified this way against Pi 0.87.1 by driving a real TUI in a PTY: `/delete` (cascade, current-only, cancel, leaf, ephemeral) and the picker key (cascade, native single delete still intact, cancel, leaf, active-session refusal, active-session-as-descendant, and `t` still reaching the search box outside the confirmation).
+
+`test/keyprobe.py` prints what a terminal actually sends for a key, which is how keybinding questions get settled rather than guessed.
 
 ## License
 
